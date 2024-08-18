@@ -1,0 +1,176 @@
+namespace MetadataExtractor.IO
+{
+    public sealed class IndexedCapturingReader : IndexedReader
+    {
+        private const int DefaultChunkLength = 2 * 1024;
+
+        private readonly Stream _stream;
+        private readonly int _chunkLength;
+        private readonly List<byte[]> _chunks = new();
+        private bool _isStreamFinished;
+        private int _streamLength;
+        private bool _streamLengthThrewException;
+
+        public IndexedCapturingReader(Stream stream, int chunkLength = DefaultChunkLength, bool isMotorolaByteOrder = true) : base(isMotorolaByteOrder)
+        {
+            if (chunkLength <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chunkLength), "Must be greater than zero.");
+
+            _chunkLength = chunkLength;
+            _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+        }
+
+        public override long Length
+        {
+            get
+            {
+                if (!_streamLengthThrewException)
+                {
+                    try
+                    {
+                        return _stream.Length;
+                    }
+                    catch (NotSupportedException)
+                    {
+                        _streamLengthThrewException = true;
+                    }
+                }
+
+                IsValidIndex(int.MaxValue, 1);
+                return _streamLength;
+            }
+        }
+
+        protected override void ValidateIndex(int index, int bytesRequested)
+        {
+            if (!IsValidIndex(index, bytesRequested))
+            {
+                if (index < 0)
+                    throw new BufferBoundsException($"Attempt to read from buffer using a negative index ({index})");
+                if (bytesRequested < 0)
+                    throw new BufferBoundsException("Number of requested bytes must be zero or greater");
+                if ((long)index + bytesRequested - 1 > int.MaxValue)
+                    throw new BufferBoundsException($"Number of requested bytes summed with starting index exceed maximum range of signed 32 bit integers (requested index: {index}, requested count: {bytesRequested})");
+
+                throw new BufferBoundsException(ToUnshiftedOffset(index), bytesRequested, _streamLength);
+            }
+        }
+
+        protected override bool IsValidIndex(int index, int bytesRequested)
+        {
+            if (index < 0 || bytesRequested < 0)
+                return false;
+
+            var endIndexLong = (long)index + bytesRequested - 1;
+            if (endIndexLong > int.MaxValue)
+                return false;
+
+            var endIndex = (int)endIndexLong;
+            if (_isStreamFinished)
+                return endIndex < _streamLength;
+
+            var chunkIndex = endIndex / _chunkLength;
+
+            while (chunkIndex >= _chunks.Count)
+            {
+                var chunk = new byte[_chunkLength];
+                var totalBytesRead = 0;
+                while (!_isStreamFinished && totalBytesRead != _chunkLength)
+                {
+                    var bytesRead = _stream.Read(chunk, totalBytesRead, _chunkLength - totalBytesRead);
+
+                    if (bytesRead == 0)
+                    {
+                        _isStreamFinished = true;
+                        _streamLength = _chunks.Count * _chunkLength + totalBytesRead;
+
+                        if (endIndex >= _streamLength)
+                        {
+                            _chunks.Add(chunk);
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        totalBytesRead += bytesRead;
+                    }
+                }
+
+                _chunks.Add(chunk);
+            }
+
+            return true;
+        }
+
+        public override int ToUnshiftedOffset(int localOffset) => localOffset;
+
+        private void GetPosition(int index, out int chunkIndex, out int innerIndex)
+        {
+            (chunkIndex, innerIndex) = Math.DivRem(index, _chunkLength);
+        }
+
+        protected override byte GetByteInternal(int index)
+        {
+            GetPosition(index, out int chunkIndex, out int innerIndex);
+            var chunk = _chunks[chunkIndex];
+            return chunk[innerIndex];
+        }
+
+        public override byte[] GetBytes(int index, int count)
+        {
+            ValidateIndex(index, count);
+
+            var bytes = new byte[count];
+            var remaining = count;
+            var fromIndex = index;
+            var toIndex = 0;
+            while (remaining != 0)
+            {
+                GetPosition(fromIndex, out int fromChunkIndex, out int fromInnerIndex);
+                var length = Math.Min(remaining, _chunkLength - fromInnerIndex);
+                var chunk = _chunks[fromChunkIndex];
+                Array.Copy(chunk, fromInnerIndex, bytes, toIndex, length);
+                remaining -= length;
+                fromIndex += length;
+                toIndex += length;
+            }
+            return bytes;
+        }
+
+        public override IndexedReader WithByteOrder(bool isMotorolaByteOrder) => isMotorolaByteOrder == IsMotorolaByteOrder ? this : new ShiftedIndexedCapturingReader(this, 0, isMotorolaByteOrder);
+
+        public override IndexedReader WithShiftedBaseOffset(int shift) => shift == 0 ? this : new ShiftedIndexedCapturingReader(this, shift, IsMotorolaByteOrder);
+
+        private sealed class ShiftedIndexedCapturingReader : IndexedReader
+        {
+            private readonly IndexedCapturingReader _baseReader;
+            private readonly int _baseOffset;
+
+            public ShiftedIndexedCapturingReader(IndexedCapturingReader baseReader, int baseOffset, bool isMotorolaByteOrder)
+                : base(isMotorolaByteOrder)
+            {
+                if (baseOffset < 0)
+                    throw new ArgumentOutOfRangeException(nameof(baseOffset), "Must be zero or greater.");
+
+                _baseReader = baseReader;
+                _baseOffset = baseOffset;
+            }
+
+            public override IndexedReader WithByteOrder(bool isMotorolaByteOrder) => isMotorolaByteOrder == IsMotorolaByteOrder ? this : new ShiftedIndexedCapturingReader(_baseReader, _baseOffset, isMotorolaByteOrder);
+
+            public override IndexedReader WithShiftedBaseOffset(int shift) => shift == 0 ? this : new ShiftedIndexedCapturingReader(_baseReader, _baseOffset + shift, IsMotorolaByteOrder);
+
+            public override int ToUnshiftedOffset(int localOffset) => localOffset + _baseOffset;
+
+            protected override byte GetByteInternal(int index) => _baseReader.GetByteInternal(_baseOffset + index);
+
+            public override byte[] GetBytes(int index, int count) => _baseReader.GetBytes(_baseOffset + index, count);
+
+            protected override void ValidateIndex(int index, int bytesRequested) => _baseReader.ValidateIndex(index + _baseOffset, bytesRequested);
+
+            protected override bool IsValidIndex(int index, int bytesRequested) => _baseReader.IsValidIndex(index + _baseOffset, bytesRequested);
+
+            public override long Length => _baseReader.Length - _baseOffset;
+        }
+    }
+}
