@@ -5,9 +5,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>False</GeneratePackageOnBuild>
-    <Title>$(AssemblyName)</Title>
+    <Title>MetadataExtractorCustom</Title>
     <Authors>kawa0x0A</Authors>
     <Version>1.0.0</Version>
+    <PackageId>MetadataExtractorCustom</PackageId>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
